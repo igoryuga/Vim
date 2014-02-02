@@ -74,7 +74,7 @@
     { keys: ['<S-BS>'], type: 'keyToKey', toKeys: ['b'] },
     { keys: ['<C-n>'], type: 'keyToKey', toKeys: ['j'] },
     { keys: ['<C-p>'], type: 'keyToKey', toKeys: ['k'] },
-    { keys: ['C-['], type: 'keyToKey', toKeys: ['<Esc>'] },
+    { keys: ['<C-[>'], type: 'keyToKey', toKeys: ['<Esc>'] },
     { keys: ['<C-c>'], type: 'keyToKey', toKeys: ['<Esc>'] },
     { keys: ['s'], type: 'keyToKey', toKeys: ['c', 'l'], context: 'normal' },
     { keys: ['s'], type: 'keyToKey', toKeys: ['x', 'i'], context: 'visual'},
@@ -331,12 +331,16 @@
     CodeMirror.defineOption('vimMode', false, function(cm, val) {
       if (val) {
         cm.setOption('keyMap', 'vim');
+        cm.setOption('disableInput', true);
         CodeMirror.signal(cm, "vim-mode-change", {mode: "normal"});
         cm.on('beforeSelectionChange', beforeSelectionChange);
         maybeInitVimState(cm);
+        CodeMirror.on(cm.getInputField(), 'paste', getOnPasteFn(cm));
       } else if (cm.state.vim) {
         cm.setOption('keyMap', 'default');
+        cm.setOption('disableInput', false);
         cm.off('beforeSelectionChange', beforeSelectionChange);
+        CodeMirror.off(cm.getInputField(), 'paste', getOnPasteFn(cm));
         cm.state.vim = null;
       }
     });
@@ -348,6 +352,18 @@
       if (head.ch && head.ch == cm.doc.getLine(head.line).length) {
         head.ch--;
       }
+    }
+    function getOnPasteFn(cm) {
+      var vim = cm.state.vim;
+      if (!vim.onPasteFn) {
+        vim.onPasteFn = function() {
+          if (!vim.insertMode) {
+            cm.setCursor(offsetCursor(cm.getCursor(), 0, 1));
+            actions.enterInsertMode(cm, {}, vim);
+          }
+        };
+      }
+      return vim.onPasteFn;
     }
 
     var numberRegex = /[\d]/;
@@ -556,9 +572,9 @@
       maybeInitVimState_: maybeInitVimState,
 
       InsertModeKey: InsertModeKey,
-      map: function(lhs, rhs) {
+      map: function(lhs, rhs, ctx) {
         // Add user defined key bindings.
-        exCommandDispatcher.map(lhs, rhs);
+        exCommandDispatcher.map(lhs, rhs, ctx);
       },
       defineEx: function(name, prefix, func){
         if (name.indexOf(prefix) !== 0) {
@@ -840,11 +856,17 @@
         } else {
           // Find the best match in the list of matchedCommands.
           var context = vim.visualMode ? 'visual' : 'normal';
-          var bestMatch = matchedCommands[0]; // Default to first in the list.
+          var bestMatch; // Default to first in the list.
           for (var i = 0; i < matchedCommands.length; i++) {
-            if (matchedCommands[i].context == context) {
-              bestMatch = matchedCommands[i];
+            var current = matchedCommands[i];
+            if (current.context == context) {
+              bestMatch = current;
               break;
+            } else if (!bestMatch && !current.context) {
+              // Only set an imperfect match to best match if no best match is
+              // set and the imperfect match is not restricted to another
+              // context.
+              bestMatch = current;
             }
           }
           return getFullyMatchedCommandOrNull(bestMatch);
@@ -1435,7 +1457,7 @@
             motionArgs.selectedCharacter);
         var increment = motionArgs.forward ? -1 : 1;
         recordLastCharacterSearch(increment, motionArgs);
-        if(!curEnd)return cm.getCursor();
+        if (!curEnd) return null;
         curEnd.ch += increment;
         return curEnd;
       },
@@ -1735,6 +1757,7 @@
           cm.setCursor(motions.moveToFirstNonWhiteSpaceCharacter(cm));
         }
         cm.setOption('keyMap', 'vim-insert');
+        cm.setOption('disableInput', false);
         if (actionArgs && actionArgs.replace) {
           // Handle Replace-mode as a special case of insert mode.
           cm.toggleOverwrite(true);
@@ -2727,10 +2750,28 @@
         if (!escapeNextChar && c == '/') {
           slashes.push(i);
         }
-        escapeNextChar = (c == '\\');
+        escapeNextChar = !escapeNextChar && (c == '\\');
       }
       return slashes;
     }
+
+    function unescapeString(str) {
+      var escapeNextChar = false;
+      var out = [];
+      for (var i = 0; i < str.length; i++) {
+        var c = str.charAt(i);
+        var next = str.charAt(i+1);
+        var slashComesNext = (next == '\\') || (next == '/');
+        if (c !== '\\' || escapeNextChar || !slashComesNext) {
+          out.push(c);
+          escapeNextChar = false;
+        } else {
+          escapeNextChar = true;
+        }
+      }
+      return out.join('');
+    }
+
     /**
      * Extract the regular expression from the query and return a Regexp object.
      * Returns null if the query is blank.
@@ -2940,14 +2981,16 @@
     // pair of commands that have a shared prefix, at least one of their
     // shortNames must not match the prefix of the other command.
     var defaultExCommandMap = [
-      { name: 'map', type: 'builtIn' },
-      { name: 'write', shortName: 'w', type: 'builtIn' },
-      { name: 'undo', shortName: 'u', type: 'builtIn' },
-      { name: 'redo', shortName: 'red', type: 'builtIn' },
-      { name: 'sort', shortName: 'sor', type: 'builtIn'},
-      { name: 'substitute', shortName: 's', type: 'builtIn'},
-      { name: 'nohlsearch', shortName: 'noh', type: 'builtIn'},
-      { name: 'delmarks', shortName: 'delm', type: 'builtin'}
+      { name: 'map' },
+      { name: 'nmap', shortName: 'nm' },
+      { name: 'vmap', shortName: 'vm' },
+      { name: 'write', shortName: 'w' },
+      { name: 'undo', shortName: 'u' },
+      { name: 'redo', shortName: 'red' },
+      { name: 'sort', shortName: 'sor' },
+      { name: 'substitute', shortName: 's' },
+      { name: 'nohlsearch', shortName: 'noh' },
+      { name: 'delmarks', shortName: 'delm' }
     ];
     Vim.ExCommandDispatcher = function() {
       this.buildCommandMap_();
@@ -3082,8 +3125,9 @@
           this.commandMap_[key] = command;
         }
       },
-      map: function(lhs, rhs) {
+      map: function(lhs, rhs, ctx) {
         if (lhs != ':' && lhs.charAt(0) == ':') {
+          if (ctx) { throw Error('Mode not supported for ex mappings'); }
           var commandName = lhs.substring(1);
           if (rhs != ':' && rhs.charAt(0) == ':') {
             // Ex to Ex mapping
@@ -3103,17 +3147,21 @@
         } else {
           if (rhs != ':' && rhs.charAt(0) == ':') {
             // Key to Ex mapping.
-            defaultKeymap.unshift({
+            var mapping = {
               keys: parseKeyString(lhs),
               type: 'keyToEx',
-              exArgs: { input: rhs.substring(1) }});
+              exArgs: { input: rhs.substring(1) }};
+            if (ctx) { mapping.context = ctx; }
+            defaultKeymap.unshift(mapping);
           } else {
             // Key to key mapping
-            defaultKeymap.unshift({
+            var mapping = {
               keys: parseKeyString(lhs),
               type: 'keyToKey',
               toKeys: parseKeyString(rhs)
-            });
+            };
+            if (ctx) { mapping.context = ctx; }
+            defaultKeymap.unshift(mapping);
           }
         }
       }
@@ -3135,7 +3183,7 @@
     }
 
     var exCommands = {
-      map: function(cm, params) {
+      map: function(cm, params, ctx) {
         var mapArgs = params.args;
         if (!mapArgs || mapArgs.length < 2) {
           if (cm) {
@@ -3143,8 +3191,10 @@
           }
           return;
         }
-        exCommandDispatcher.map(mapArgs[0], mapArgs[1], cm);
+        exCommandDispatcher.map(mapArgs[0], mapArgs[1], ctx);
       },
+      nmap: function(cm, params) { this.map(cm, params, 'normal'); },
+      vmap: function(cm, params) { this.map(cm, params, 'visual'); },
       move: function(cm, params) {
         commandDispatcher.processCommand(cm, cm.state.vim, {
             type: 'motion',
@@ -3246,7 +3296,7 @@
         var count;
         var confirm = false; // Whether to confirm each replace.
         if (slashes[1]) {
-          replacePart = argString.substring(slashes[1] + 1, slashes[2]);
+          replacePart = unescapeString(argString.substring(slashes[1] + 1, slashes[2]));
         }
         if (slashes[2]) {
           // After the 3rd slash, we can have flags followed by a space followed
@@ -3463,18 +3513,10 @@
        * Shift + key modifier to the resulting letter, while preserving other
        * modifers.
        */
-      // TODO: Figure out a way to catch capslock.
       function cmKeyToVimKey(key, modifier) {
         var vimKey = key;
-        if (isUpperCase(vimKey)) {
-          // Convert to lower case if shift is not the modifier since the key
-          // we get from CodeMirror is always upper case.
-          if (modifier == 'Shift') {
-            modifier = null;
-          }
-          else {
+        if (isUpperCase(vimKey) && modifier == 'Ctrl') {
             vimKey = vimKey.toLowerCase();
-          }
         }
         if (modifier) {
           // Vim will parse modifier+key combination as a single key.
@@ -3495,15 +3537,14 @@
 
       var cmToVimKeymap = {
         'nofallthrough': true,
-        'disableInput': true,
         'style': 'fat-cursor'
       };
       function bindKeys(keys, modifier) {
         for (var i = 0; i < keys.length; i++) {
           var key = keys[i];
-          if (!modifier && inArray(key, specialSymbols)) {
-            // Wrap special symbols with '' because that's how CodeMirror binds
-            // them.
+          if (!modifier && key.length == 1) {
+            // Wrap all keys without modifiers with '' to identify them by their
+            // key characters instead of key identifiers.
             key = "'" + key + "'";
           }
           var vimKey = cmKeyToVimKey(keys[i], modifier);
@@ -3512,7 +3553,7 @@
         }
       }
       bindKeys(upperCaseAlphabet);
-      bindKeys(upperCaseAlphabet, 'Shift');
+      bindKeys(lowerCaseAlphabet);
       bindKeys(upperCaseAlphabet, 'Ctrl');
       bindKeys(specialSymbols);
       bindKeys(specialSymbols, 'Ctrl');
@@ -3542,6 +3583,7 @@
       cm.setCursor(cm.getCursor().line, cm.getCursor().ch-1, true);
       vim.insertMode = false;
       cm.setOption('keyMap', 'vim');
+      cm.setOption('disableInput', true);
       cm.toggleOverwrite(false); // exit replace mode if we were in it.
       CodeMirror.signal(cm, "vim-mode-change", {mode: "normal"});
     }
